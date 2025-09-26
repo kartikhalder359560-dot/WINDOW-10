@@ -1,0 +1,96 @@
+name: Full Gaming RDP + Info (secure)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360  # ⬅️ 6 hours
+
+    env:
+      # Desired hardware/specs (edit these to your target VM specs)
+      DESIRED_RAM: "32GB"
+      DESIRED_CPU: "8 cores"
+      DESIRED_STORAGE: "500GB NVMe"
+      DESIRED_GPU: "8GB Dedicated GPU"
+
+      # Secrets (set these in your repo: Settings -> Secrets -> Actions)
+      RDP_IP: ${{ secrets.RDP_IP }}
+      RDP_USER: ${{ secrets.RDP_USER }}
+      RDP_PASS: ${{ secrets.RDP_PASS }}
+
+    steps:
+      - name: Checkout (for workspace)
+        uses: actions/checkout@v4
+
+      - name: Create .rdp file (contains IP & username only)
+        shell: powershell
+        run: |
+          if (-not $env:RDP_IP) { Write-Error "RDP_IP secret not set"; exit 1 }
+          $rdpPath = Join-Path $env:GITHUB_WORKSPACE "gaming_vm.rdp"
+          "full address:s:$env:RDP_IP" | Out-File -FilePath $rdpPath -Encoding ascii
+          "username:s:$env:RDP_USER" | Out-File -FilePath $rdpPath -Append -Encoding ascii
+          Write-Host "Created RDP file at $rdpPath (contains IP and username only)."
+
+      - name: Store credentials in Windows Credential Manager (secure, not printed)
+        shell: powershell
+        run: |
+          $target = "TERMSRV/$env:RDP_IP"
+          Write-Host "Storing credentials in Windows Credential Manager for target $target (password hidden)."
+          $cmd = "cmdkey.exe /generic:$target /user:$env:RDP_USER /pass:$env:RDP_PASS"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -NoNewWindow -Wait
+
+      - name: Gather desired + actual VM/system info
+        shell: powershell
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE "vm_info.txt"
+          "=== Desired VM Specs (user-defined) ===" | Out-File -FilePath $out -Encoding utf8
+          "DESIRED_RAM: $env:DESIRED_RAM" | Out-File -FilePath $out -Append -Encoding utf8
+          "DESIRED_CPU: $env:DESIRED_CPU" | Out-File -FilePath $out -Append -Encoding utf8
+          "DESIRED_STORAGE: $env:DESIRED_STORAGE" | Out-File -FilePath $out -Append -Encoding utf8
+          "DESIRED_GPU: $env:DESIRED_GPU" | Out-File -FilePath $out -Append -Encoding utf8
+          ""
+          "=== Actual Runner/System Info (read from this machine) ===" | Out-File -FilePath $out -Append -Encoding utf8
+          try {
+            $mem = (Get-CimInstance -ClassName Win32_ComputerSystem).TotalPhysicalMemory
+            $memGB = [math]::Round($mem / 1GB, 2)
+            "TotalPhysicalMemory (GB): $memGB" | Out-File -FilePath $out -Append -Encoding utf8
+          } catch { "TotalPhysicalMemory: unknown" | Out-File -FilePath $out -Append -Encoding utf8 }
+          try {
+            $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1 -Property Name,NumberOfCores,NumberOfLogicalProcessors
+            "CPU: $($cpu.Name)" | Out-File -FilePath $out -Append -Encoding utf8
+            "CPU_Cores: $($cpu.NumberOfCores)" | Out-File -FilePath $out -Append -Encoding utf8
+            "CPU_LogicalProcessors: $($cpu.NumberOfLogicalProcessors)" | Out-File -FilePath $out -Append -Encoding utf8
+          } catch { "CPU: unknown" | Out-File -FilePath $out -Append -Encoding utf8 }
+          try {
+            $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3"
+            foreach ($d in $disks) {
+              $sizeGB = if ($d.Size) { [math]::Round($d.Size/1GB,2) } else { "unknown" }
+              "Drive $($d.DeviceID): Size(GB): $sizeGB, FreeSpace(GB): $([math]::Round($d.FreeSpace/1GB,2))" | Out-File -FilePath $out -Append -Encoding utf8
+            }
+          } catch { "Disk info: unknown" | Out-File -FilePath $out -Append -Encoding utf8 }
+          try {
+            $gpus = Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM
+            if ($gpus) {
+              foreach ($g in $gpus) {
+                $memGB = if ($g.AdapterRAM) { [math]::Round($g.AdapterRAM/1MB,2) + " MB" } else { "unknown" }
+                "GPU: $($g.Name) - RAM: $memGB" | Out-File -FilePath $out -Append -Encoding utf8
+              }
+            } else {
+              "GPU: none detected or access restricted" | Out-File -FilePath $out -Append -Encoding utf8
+            }
+          } catch { "GPU info: unknown" | Out-File -FilePath $out -Append -Encoding utf8 }
+          ""
+          "=== Credential storage information ===" | Out-File -FilePath $out -Append -Encoding utf8
+          "Stored target (Windows Credential Manager): TERMSRV/$env:RDP_IP" | Out-File -FilePath $out -Append -Encoding utf8
+          "Note: The plain password is NOT saved into artifacts or logs. It is stored in the runner's credential manager (ephemeral)." | Out-File -FilePath $out -Append -Encoding utf8
+          Write-Host "vm_info.txt created at $out"
+
+      - name: Upload artifacts (rdp + vm_info)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaming-rdp-artifacts
+          path: |
+            gaming_vm.rdp
+            vm_info.txt
